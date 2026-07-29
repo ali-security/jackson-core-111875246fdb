@@ -2,6 +2,7 @@ package com.fasterxml.jackson.core;
 
 import java.io.StringWriter;
 
+import com.fasterxml.jackson.core.exc.StreamReadException;
 import com.fasterxml.jackson.core.io.JsonEOFException;
 
 public class TestExceptions extends BaseTest
@@ -118,5 +119,91 @@ public class TestExceptions extends BaseTest
         p.close();
 
         // any other cases we'd like to test?
+    }
+
+    public void testContentSnippetWithOffset() throws Exception
+    {
+        JsonParser p;
+        final String json = a2q("{'k1':'v1'}\n[broken]\n");
+        final byte[] jsonB = utf8Bytes(json);
+        final int lfIndex = json.indexOf("\n");
+        final int start = lfIndex+1;
+        final int len = json.length() - start;
+
+        p = JSON_F.createParser(jsonB, start, len);
+        // for byte-based, will be after character that follows token:
+        // (and alas cannot be easily fixed)
+        _testContentSnippetWithOffset(p, 9, "(byte[])\"[broken]\n\"");
+        p.close();
+
+        final char[] jsonC = json.toCharArray();
+        p = JSON_F.createParser(jsonC, start, len);
+        // for char-based we get true offset at end of token
+        _testContentSnippetWithOffset(p, 8, "(char[])\"[broken]\n\"");
+        p.close();
+    }
+
+    private void _testContentSnippetWithOffset(final JsonParser p,
+            int expColumn, String expContent) throws Exception
+    {
+        assertToken(JsonToken.START_ARRAY, p.nextToken());
+        try {
+            p.nextToken();
+            fail("Should not pass");
+        } catch (StreamReadException e) {
+            verifyException(e, "Unrecognized token 'broken'");
+            JsonLocation loc = e.getLocation();
+            assertEquals(1, loc.getLineNr());
+            assertEquals(expColumn, loc.getColumnNr());
+            final String srcDesc = loc.sourceDescription();
+
+            assertEquals(expContent, srcDesc);
+        }
+    }
+
+    // [core#652]: content outside the declared [offset, offset+len) region must
+    // never leak into location/exception messages -- neither what precedes the
+    // offset nor what follows the declared length (matters for pooled/reused
+    // buffers, as used by f.ex Netty and Vert.x)
+    public void testContentSnippetDoesNotLeakOutsideOffsetAndLength() throws Exception
+    {
+        final String before = a2q("{'password':'s3cr3t-before'}\n");
+        final String region = "[broken]";
+        final String after = a2q("\n{'token':'s3cr3t-after'}");
+        final String buffer = before + region + after;
+        final int start = before.length();
+        final int len = region.length();
+
+        // all-ASCII content, so byte offsets match char offsets
+        JsonParser p = JSON_F.createParser(utf8Bytes(buffer), start, len);
+        _testNoContentLeak(p, "(byte[])\"[broken]\"");
+        p.close();
+
+        p = JSON_F.createParser(buffer.toCharArray(), start, len);
+        _testNoContentLeak(p, "(char[])\"[broken]\"");
+        p.close();
+    }
+
+    private void _testNoContentLeak(final JsonParser p, String expContent)
+        throws Exception
+    {
+        assertToken(JsonToken.START_ARRAY, p.nextToken());
+        try {
+            p.nextToken();
+            fail("Should not pass");
+        } catch (StreamReadException e) {
+            verifyException(e, "Unrecognized token 'broken'");
+            final String srcDesc = e.getLocation().sourceDescription();
+            // exact snippet is just the declared region...
+            assertEquals(expContent, srcDesc);
+            // ... and, spelled out, neither surrounding secret is exposed
+            if (srcDesc.contains("s3cr3t")) {
+                fail("Source description leaked content outside declared region: "+srcDesc);
+            }
+            // same for the full message rendering of the exception
+            if (e.getMessage().contains("s3cr3t")) {
+                fail("Exception message leaked content outside declared region: "+e.getMessage());
+            }
+        }
     }
 }
