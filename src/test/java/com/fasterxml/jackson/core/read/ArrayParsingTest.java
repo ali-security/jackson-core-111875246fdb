@@ -1,6 +1,7 @@
 package com.fasterxml.jackson.core.read;
 
 import com.fasterxml.jackson.core.*;
+import com.fasterxml.jackson.core.exc.StreamConstraintsException;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
 
 /**
@@ -106,6 +107,89 @@ public class ArrayParsingTest
         _testNotMissingValueByEnablingFeature(false);
     }
     
+    public void testDeepNesting() throws Exception
+    {
+        final String DOC = createDeepNestedDoc(1050);
+        JsonParser jp = createParserUsingStream(new JsonFactory(), DOC, "UTF-8");
+        try {
+            JsonToken jt;
+            while ((jt = jp.nextToken()) != null) {
+
+            }
+            fail("expected StreamConstraintsException");
+        } catch (StreamConstraintsException e) {
+            assertEquals("Depth (1001) exceeds the maximum allowed nesting depth (1000)", e.getMessage());
+        }
+        jp.close();
+    }
+
+    // Same exploit, but verified against every blocking parser backend:
+    // byte-based (UTF8StreamJsonParser), char-based (ReaderBasedJsonParser)
+    // and DataInput-based (UTF8DataInputJsonParser).
+    public void testDeepNestingAllModes() throws Exception
+    {
+        final String DOC = createDeepNestedDoc(1050);
+        for (int mode : ALL_MODES) {
+            JsonParser jp = createParser(new JsonFactory(), mode, DOC);
+            try {
+                while (jp.nextToken() != null) { }
+                fail("expected StreamConstraintsException (mode "+mode+")");
+            } catch (StreamConstraintsException e) {
+                assertEquals("Depth (1001) exceeds the maximum allowed nesting depth (1000)",
+                        e.getMessage());
+            }
+            jp.close();
+        }
+    }
+
+    // Sanity check that the new limit does not reject documents that stay
+    // within the allowed nesting depth.
+    public void testDeepNestingBelowLimitOk() throws Exception
+    {
+        // 499 objects + 499 arrays + outermost array == 999 levels
+        final String DOC = createDeepNestedDoc(499);
+        for (int mode : ALL_MODES) {
+            JsonParser jp = createParser(new JsonFactory(), mode, DOC);
+            while (jp.nextToken() != null) { }
+            jp.close();
+        }
+    }
+
+    // Limit must remain configurable via StreamReadConstraints
+    public void testDeepNestingWithCustomLimit() throws Exception
+    {
+        final JsonFactory f = JsonFactory.builder()
+                .streamReadConstraints(StreamReadConstraints.builder()
+                        .maxNestingDepth(10).build())
+                .build();
+        final String DOC = createDeepNestedDoc(20);
+        for (int mode : ALL_MODES) {
+            JsonParser jp = createParser(f, mode, DOC);
+            try {
+                while (jp.nextToken() != null) { }
+                fail("expected StreamConstraintsException (mode "+mode+")");
+            } catch (StreamConstraintsException e) {
+                assertEquals("Depth (11) exceeds the maximum allowed nesting depth (10)",
+                        e.getMessage());
+            }
+            jp.close();
+        }
+    }
+
+    public void testMaxNestingDepthSettings() throws Exception
+    {
+        assertEquals(StreamReadConstraints.DEFAULT_MAX_DEPTH,
+                StreamReadConstraints.builder().build().getMaxNestingDepth());
+        assertEquals(25,
+                StreamReadConstraints.builder().maxNestingDepth(25).build().getMaxNestingDepth());
+        try {
+            StreamReadConstraints.builder().maxNestingDepth(-1);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            verifyException(e, "Cannot set maxNestingDepth to a negative value");
+        }
+    }
+
     private void _testMissingValueByEnablingFeature(boolean useStream) throws Exception {
         String DOC = "[ \"a\",,,,\"abc\", ] ";
 
@@ -181,5 +265,19 @@ public class ArrayParsingTest
         assertToken(JsonToken.END_ARRAY, jp.nextToken());
              
         jp.close();
+    }
+
+    private String createDeepNestedDoc(final int depth) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        for (int i = 0; i < depth; i++) {
+            sb.append("{ \"a\": [");
+        }
+        sb.append(" \"val\" ");
+        for (int i = 0; i < depth; i++) {
+            sb.append("]}");
+        }
+        sb.append("]");
+        return sb.toString();
     }
 }

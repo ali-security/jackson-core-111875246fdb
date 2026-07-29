@@ -4,11 +4,63 @@ import java.io.IOException;
 
 import com.fasterxml.jackson.core.*;
 import com.fasterxml.jackson.core.async.AsyncTestBase;
+import com.fasterxml.jackson.core.exc.StreamConstraintsException;
 import com.fasterxml.jackson.core.testsupport.AsyncReaderWrapper;
 
 public class AsyncSimpleNestedTest extends AsyncTestBase
 {
     private final JsonFactory JSON_F = new JsonFactory();
+
+    /*
+    /**********************************************************************
+    /* Test methods, nesting depth limit
+    /**********************************************************************
+     */
+
+    // Deeply nested input must be rejected by the non-blocking parser too,
+    // instead of eventually causing a StackOverflowError downstream
+    public void testDeepNesting() throws Exception
+    {
+        byte[] data = _jsonDoc(_createDeepNestedDoc(1050));
+        _testDeepNesting(JSON_F, data, 0, 9999);
+        _testDeepNesting(JSON_F, data, 0, 3);
+        _testDeepNesting(JSON_F, data, 1, 1);
+    }
+
+    private void _testDeepNesting(JsonFactory f,
+            byte[] data, int offset, int readSize) throws IOException
+    {
+        AsyncReaderWrapper r = asyncForBytes(f, readSize, data, offset);
+        try {
+            while (r.nextToken() != null) { }
+            fail("expected StreamConstraintsException");
+        } catch (StreamConstraintsException e) {
+            assertEquals("Depth (1001) exceeds the maximum allowed nesting depth (1000)",
+                    e.getMessage());
+        }
+    }
+
+    // and content within the limit must still parse fine
+    public void testDeepNestingBelowLimitOk() throws Exception
+    {
+        byte[] data = _jsonDoc(_createDeepNestedDoc(499));
+        AsyncReaderWrapper r = asyncForBytes(JSON_F, 9999, data, 0);
+        while (r.nextToken() != null) { }
+    }
+
+    private String _createDeepNestedDoc(final int depth) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        for (int i = 0; i < depth; i++) {
+            sb.append("{ \"a\": [");
+        }
+        sb.append(" \"val\" ");
+        for (int i = 0; i < depth; i++) {
+            sb.append("]}");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
 
     /*
     /**********************************************************************
